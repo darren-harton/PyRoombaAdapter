@@ -294,7 +294,11 @@ class PyRoombaAdapter:
         roomba_mm_sec = self._adjust_min_max(roomba_mm_sec, self.PARAMS["MIN_VELOCITY"], self.PARAMS["MAX_VELOCITY"])
         velHighVal, velLowVal = self._get_2_bytes(roomba_mm_sec)
 
-        roomba_radius_mm = self._adjust_min_max(roomba_radius_mm, self.PARAMS["MIN_RADIUS"], self.PARAMS["MAX_RADIUS"])
+        if roomba_radius_mm != self.PARAMS["STRAIGHT_RADIUS"]:
+            roomba_radius_mm = self._adjust_min_max(roomba_radius_mm,
+                                                    self.PARAMS["MIN_RADIUS"],
+                                                    self.PARAMS["MAX_RADIUS"])
+
         radiusHighVal, radiusLowVal = self._get_2_bytes(roomba_radius_mm)
 
         # send these bytes and set the stored velocities
