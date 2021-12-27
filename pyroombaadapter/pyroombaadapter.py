@@ -7,9 +7,165 @@ This module is based on the document: iRobot® Roomba 500 Open Interface (OI) Sp
 """
 import math
 import sys
+import time
 from time import sleep
+from typing import Iterable
+import itertools
+import functools
+import struct
 
 import serial  # pyserial
+
+from enum import IntEnum
+
+
+class OIMode(IntEnum):
+    OFF = 0
+    PASSIVE = 1
+    SAFE = 2
+    FULL = 3
+
+
+class PacketType(IntEnum):
+    BUMP_AND_WHEEL_DROP = 7
+    WALL = 8
+    CLIFF_LEFT = 9
+    CLIFF_FRONT_LEFT = 10
+    CLIFF_FRONT_RIGHT = 11
+    CLIFF_RIGHT = 12
+    VIRTUAL_WALL = 13
+    WHEEL_OVERCURRENT = 14
+    DIRT_DETECT = 15
+    UNUSED1 = 16
+    INFRARED_CHAR_OMNI = 17
+    BUTTONS = 18
+    DISTANCE = 19
+    ANGLE = 20
+    CHARGING_STATE = 21
+    VOLTAGE = 22
+    CURRENT = 23
+    TEMPERATURE = 24
+    BATTERY_CHARGE = 25
+    BATTER_CAPACITY = 26
+    WALL_SIGNAL_STR = 27
+    CLIFF_LEFT_SIGNAL_STR = 28
+    CLIFF_FRONT_LEFT_SIGNAL_STR = 29
+    CLIFF_FRONT_RIGHT_SIGNAL_STR = 30
+    CLIFF_RIGHT_SIGNAL_STR = 31
+    UNUSED2 = 32
+    UNUSED3 = 33
+    CHARGING_SOURCES_AVAILABLE = 34
+    OI_MODE = 35
+    SONG_NUMBER = 36
+    SONG_PLAYING = 37
+    NUM_STREAM_PACKETS = 38
+    REQ_VELOCITY = 39
+    REQ_RADIUS = 40
+    REQ_RIGHT_VELOCITY = 41
+    REQ_LEFT_VELOCITY = 42
+    RIGHT_ENCODER_COUNTS = 43
+    LEFT_ENCODER_COUNTS = 44
+    LIGHT_BUMPER = 45
+    LIGHT_BUMP_LEFT_SIGNAL = 46
+    LIGHT_BUMP_FRONT_LEFT_SIGNAL = 47
+    LIGHT_BUMP_CENTER_LEFT_SIGNAL = 48
+    LIGHT_BUMP_CENTER_RIGHT_SIGNAL = 49
+    LIGHT_BUMP_FRONT_RIGHT_SIGNAL = 50
+    LIGHT_BUMP_RIGHT_SIGNAL = 51
+    INFRARED_CHAR_LEFT = 52
+    INFRARED_CHAR_RIGHT = 53
+    LEFT_MOTOR_CURRENT = 54
+    RIGHT_MOTOR_CURRENT = 55
+    MAIN_BRUSH_MOTOR_CURRENT = 56
+    SIDE_BRUSH_MOTOR_CURRENT = 57
+    STASIS = 58
+
+
+def decode_booleans(val: int, num_bits: int):
+    """Decodes an integer into a list of booleans."""
+    res = []
+    for bit in range(num_bits):
+        mask = 1 << bit
+        res.append((val & mask) == mask)
+    return res
+
+
+# Key = PacketID, Value = (name, num_bytes, unpack format, decode function (if any))
+# See https://docs.python.org/3/library/struct.html#format-characters
+PacketInfo = {
+    PacketType.BUMP_AND_WHEEL_DROP: (1, "B", functools.partial(decode_booleans, num_bits=4)),
+    PacketType.WALL: (1, "B", bool),
+    PacketType.CLIFF_LEFT: (1, "B", bool),
+    PacketType.CLIFF_FRONT_LEFT: (1, "B", bool),
+    PacketType.CLIFF_FRONT_RIGHT: (1, "B", bool),
+    PacketType.CLIFF_RIGHT: (1, "B", bool),
+    PacketType.VIRTUAL_WALL: (1, "B", bool),
+    PacketType.WHEEL_OVERCURRENT: (1, "B", functools.partial(decode_booleans, num_bits=5)),
+    PacketType.DIRT_DETECT: (1, "B", None),
+    PacketType.UNUSED1: (1, "B", None),
+    PacketType.INFRARED_CHAR_OMNI: (1, "B", None),
+    PacketType.BUTTONS: (1, "B", functools.partial(decode_booleans, num_bits=8)),
+    PacketType.DISTANCE: (2, "h", None),
+    PacketType.ANGLE: (2, "h", None),
+    PacketType.CHARGING_STATE: (1, "B", None),
+    PacketType.VOLTAGE: (2, "H", None),
+    PacketType.CURRENT: (2, "h", None),
+    PacketType.TEMPERATURE: (1, "b", None),
+    PacketType.BATTERY_CHARGE: (2, "H", None),
+    PacketType.BATTER_CAPACITY: (2, "H", None),
+    PacketType.WALL_SIGNAL_STR: (2, "H", None),
+    PacketType.CLIFF_LEFT_SIGNAL_STR: (2, "H", None),
+    PacketType.CLIFF_FRONT_LEFT_SIGNAL_STR: (2, "H", None),
+    PacketType.CLIFF_FRONT_RIGHT_SIGNAL_STR: (2, "H", None),
+    PacketType.CLIFF_RIGHT_SIGNAL_STR: (2, "H", None),
+    PacketType.UNUSED2: (1, "B", None),
+    PacketType.UNUSED3: (2, "H", None),
+    PacketType.CHARGING_SOURCES_AVAILABLE: (1, "B", functools.partial(decode_booleans, num_bits=2)),
+    PacketType.OI_MODE: (1, "B", OIMode),
+    PacketType.SONG_NUMBER: (1, "B", None),
+    PacketType.SONG_PLAYING: (1, "B", bool),
+    PacketType.NUM_STREAM_PACKETS: (1, "B", None),
+    PacketType.REQ_VELOCITY: (2, "h", None),
+    PacketType.REQ_RADIUS: (2, "h", None),
+    PacketType.REQ_RIGHT_VELOCITY: (2, "h", None),
+    PacketType.REQ_LEFT_VELOCITY: (2, "h", None),
+    PacketType.RIGHT_ENCODER_COUNTS: (2, "H", None),
+    PacketType.LEFT_ENCODER_COUNTS: (2, "H", None),
+    PacketType.LIGHT_BUMPER: (1, "B", functools.partial(decode_booleans, num_bits=6)),
+    PacketType.LIGHT_BUMP_LEFT_SIGNAL: (1, "H", None),
+    PacketType.LIGHT_BUMP_FRONT_LEFT_SIGNAL: (1, "H", None),
+    PacketType.LIGHT_BUMP_CENTER_LEFT_SIGNAL: (1, "H", None),
+    PacketType.LIGHT_BUMP_CENTER_RIGHT_SIGNAL: (1, "H", None),
+    PacketType.LIGHT_BUMP_FRONT_RIGHT_SIGNAL: (1, "H", None),
+    PacketType.LIGHT_BUMP_RIGHT_SIGNAL: (1, "H", None),
+    PacketType.INFRARED_CHAR_LEFT: (1, "B", None),
+    PacketType.INFRARED_CHAR_RIGHT: (1, "B", None),
+    PacketType.LEFT_MOTOR_CURRENT: (2, "h", None),
+    PacketType.RIGHT_MOTOR_CURRENT: (2, "h", None),
+    PacketType.MAIN_BRUSH_MOTOR_CURRENT: (2, "h", None),
+    PacketType.SIDE_BRUSH_MOTOR_CURRENT: (2, "h", None),
+    PacketType.STASIS: (1, "B", bool),
+}
+
+
+def decode_packets(packets_raw: bytes):
+    ipackets = iter(packets_raw)
+    while True:
+        try:
+            packet_id = next(ipackets)
+        except StopIteration:
+            break
+        num_bytes = PacketInfo[PacketType(packet_id)][1]
+        data = itertools.islice(ipackets, num_bytes)
+        yield decode_packet(packet_id, bytes(data))
+
+
+def decode_packet(packet_id: int, packet: bytes):
+    name, _, fmt, func = PacketInfo[PacketType(packet_id)]
+    decoded = struct.unpack(fmt, packet)
+    if func is not None:
+        decoded = func(decoded)
+    return name, decoded
 
 
 class PyRoombaAdapter:
@@ -19,11 +175,8 @@ class PyRoombaAdapter:
     The constructor connects serial port and change the mode to safe mode
 
     :param string port: Serial port path
-
     :param int bau_rate: bau rate of serial connection (default=115200)
-
     :param float time_out_sec: read time out of serial connection [sec] (default=1.0)
-
     :param float wheel_span_mm: wheel span of Roomba [mm]  (default=235.0)
 
     Examples:
@@ -40,12 +193,12 @@ class PyRoombaAdapter:
            "Clean": 135,
            "Max": 136,
            "Drive": 137,
-           "Moters": 138,
+           "Motors": 138,
            "Song": 140,
            "Play": 141,
            "Sensors": 142,
            "Seek Dock": 143,
-           "PWM Moters": 144,
+           "PWM Motors": 144,
            "Drive Direct": 145,
            "Drive PWM": 146,
            "Query List": 149,
@@ -343,7 +496,6 @@ class PyRoombaAdapter:
         - Available in modes: Safe or Full
 
         :param int right_pwm: Right wheel PWM (-255 – 255)
-
         :param int left_pwm: Left wheel PWM (-255 - 255)
 
         Examples:
@@ -361,33 +513,28 @@ class PyRoombaAdapter:
         # send these bytes and set the stored velocities
         self._send_cmd([self.CMD["Drive PWM"], right_high, right_low, left_high, left_low])
 
-    def send_moters_cmd(self, main_brush_on, main_brush_direction_is_ccw,
+    def send_motors_cmd(self, main_brush_on, main_brush_direction_is_ccw,
                         side_brush_on, side_brush_direction_is_inward,
                         vacuum_on
                         ):
         """
-        send moters command
+        send motors command
 
         This command controls the motion of Roomba’s main brush, side brush, and vacuum independently.
         Motor velocity cannot be controlled with this command, all motors will run at maximum speed when enabled.
         The main brush and side brush can be run in either direction. The vacuum only runs forward.
 
         :param bool main_brush_on: main brush on or off
-
         :param bool main_brush_direction_is_ccw: main brush direction, clockwise or counter-clockwise(default)
-
         :param bool side_brush_on: side brush on or off
-
         :param bool side_brush_direction_is_inward: side brush direction, inward(default) or outward
-
         :param bool side_brush_on: side brush on or off
-
         :param bool vacuum_on: vacuum on or off
 
         Examples:
             >>> PORT = "/dev/ttyUSB0"
             >>> adapter = PyRoombaAdapter(PORT)
-            >>> adapter.send_moters_cmd(False, True, True, True, False) # side brush is on, and it rotates inward
+            >>> adapter.send_motors_cmd(False, True, True, True, False) # side brush is on, and it rotates inward
             >>> sleep(2.0) # keep 2 sec
         """
         cmd = 0  # All initial bit is 0
@@ -402,11 +549,11 @@ class PyRoombaAdapter:
         if not main_brush_direction_is_ccw:
             cmd |= 0b00010000
 
-        self._send_cmd([self.CMD["Moters"], cmd])
+        self._send_cmd([self.CMD["Motors"], cmd])
 
-    def send_pwm_moters(self, main_brush_pwm, side_brush_pwm, vacuum_pwm):
+    def send_pwm_motors(self, main_brush_pwm, side_brush_pwm, vacuum_pwm):
         """
-        send pwm moters
+        send pwm motors
 
         This command control the speed of Roomba’s main brush, side brush, and vacuum independently.
         With each data byte, you specify the duty cycle for the low side driver (max 128).
@@ -426,13 +573,13 @@ class PyRoombaAdapter:
 
         Examples:
             >>> adapter = PyRoombaAdapter("/dev/ttyUSB0")
-            >>> adapter.send_pwm_moters(-55, 0, 0) # main brush is 55% PWM to opposite direction
+            >>> adapter.send_pwm_motors(-55, 0, 0) # main brush is 55% PWM to opposite direction
             >>> sleep(2.0) # keep 2 sec
         """
         main_brush_pwm = self._get_1_bytes(self._adjust_min_max(main_brush_pwm, -127, 127))
         side_brush_pwm = self._get_1_bytes(self._adjust_min_max(side_brush_pwm, -127, 127))
         vacuum_pwm = self._adjust_min_max(vacuum_pwm, 0, 127)
-        self._send_cmd([self.CMD["PWM Moters"], main_brush_pwm, side_brush_pwm, vacuum_pwm])
+        self._send_cmd([self.CMD["PWM Motors"], main_brush_pwm, side_brush_pwm, vacuum_pwm])
 
     def send_buttons_cmd(self, clean=False, spot=False, dock=False,
                          minute=False, hour=False, day=False, schedule=False, clock=False):
@@ -613,6 +760,44 @@ class PyRoombaAdapter:
         else:  # one command
             self.serial_con.write(bytes([cmd]))
 
+    def _read_packets(self, timeout_s=1):
+        """
+        Does not guarantee that it will return by the timeout.
+        That would require changing the serial_con timeout. (TODO)
+        """
+        header = bin(19)  # All sensor messages have this header per OI spec.
+        start = time.time()
+        time_left = timeout_s
+
+        while time_left > 0:
+
+            data = self.serial_con.read(1)
+            if data == header:
+                # Data stream should look like:
+                #  [header, n-bytes, packets, checksum]
+                num_bytes = self.serial_con.read(1)
+                packets_raw = self.serial_con.read(num_bytes)
+                checksum = self.serial_con.read(1)
+
+                # Use the checksum to verify the message integrity
+                assert sum(packets_raw + checksum) == 256, "Invalid message."
+                return decode_packets(packets_raw)
+
+            elapsed = time.time() - start
+            time_left = timeout_s - elapsed
+        raise TimeoutError("Unable to read packets")
+
+    def request_sensor_data(self, packet_types: Iterable[PacketType], timeout_s=1):
+        header = 142  # All sensor requests have this header per OI spec.
+        packet_ids = [int(x) for x in packet_types]
+        # Send command
+        self._send_cmd([header] + packet_ids)
+        # Get response
+        return self._read_packets(timeout_s=timeout_s)
+
+
+
+
 
 def main():
     PORT = "/dev/ttyUSB0"
@@ -623,8 +808,8 @@ def main():
     # adapter.move(0.1, math.radians(-10))
     # adapter.send_drive_pwm(80, 80)
     # adapter.send_drive_pwm(-200, -200)
-    # adapter.send_moters_cmd(False, True, True, True, False)
-    # adapter.send_pwm_moters(-55, -25, 25)
+    # adapter.send_motors_cmd(False, True, True, True, False)
+    # adapter.send_pwm_motors(-55, -25, 25)
     # adapter.send_buttons_cmd(dock=True)
     # sleep(1.0)
 
