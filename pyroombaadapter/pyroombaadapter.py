@@ -150,22 +150,29 @@ PacketInfo = {
 
 def decode_packets(packets_raw: bytes):
     ipackets = iter(packets_raw)
+    results = []
     while True:
         try:
             packet_id = next(ipackets)
         except StopIteration:
             break
-        num_bytes = PacketInfo[PacketType(packet_id)][1]
+        num_bytes = PacketInfo[PacketType(packet_id)][0]
         data = itertools.islice(ipackets, num_bytes)
-        yield decode_packet(packet_id, bytes(data))
+        results.append(decode_packet(packet_id, bytes(data)))
+    return results
 
 
 def decode_packet(packet_id: int, packet: bytes):
-    name, _, fmt, func = PacketInfo[PacketType(packet_id)]
-    decoded = struct.unpack(fmt, packet)
-    if func is not None:
-        decoded = func(decoded)
-    return name, decoded
+    _, fmt, func = PacketInfo[PacketType(packet_id)]
+    try:
+        decoded = struct.unpack("!" + fmt, packet)[0]
+        if func is not None:
+            decoded = func(decoded)
+    except Exception as e:
+        print("Error decoding packet", packet_id, packet)
+        raise e
+
+    return decoded
 
 
 class PyRoombaAdapter:
@@ -395,7 +402,7 @@ class PyRoombaAdapter:
 
         :param float velocity: velocity (m/sec)
 
-        :param float yaw_rate: yaw rate (rad/sec)
+        :param float yaw_rate: yaw rate (deg/sec)
 
         Examples:
             >>> import math
@@ -406,6 +413,7 @@ class PyRoombaAdapter:
             >>> time.sleep(1.0) # keep rotate
             >>> adapter.move(0.1, 0.0) # move straight with 10cm/sec
         """
+
         if velocity == 0:  # rotation
             vel_mm_sec = math.fabs(yaw_rate) * (self.WHEEL_SPAN / 2.0)
             if yaw_rate >= 0:
@@ -707,6 +715,7 @@ class PyRoombaAdapter:
     @staticmethod
     def _connect_serial(port, bau_rate, time_out):
         serial_con = serial.Serial(port, baudrate=bau_rate, timeout=time_out)
+        time.sleep(.1)
         if serial_con.isOpen():
             print('Serial port is open, presumably to a roomba...')
         else:
@@ -760,18 +769,22 @@ class PyRoombaAdapter:
         else:  # one command
             self.serial_con.write(bytes([cmd]))
 
-    def _read_packets(self, timeout_s=1):
+    def _read_stream_packets(self, timeout_s=1):
         """
         Does not guarantee that it will return by the timeout.
         That would require changing the serial_con timeout. (TODO)
+
+
+        This function is not currently used. will keep here in case reading streams is required.
         """
-        header = bin(19)  # All sensor messages have this header per OI spec.
+        header = chr(19)  # All sensor messages have this header per OI spec.
         start = time.time()
         time_left = timeout_s
 
         while time_left > 0:
 
             data = self.serial_con.read(1)
+            print("recieved: ", data)
             if data == header:
                 # Data stream should look like:
                 #  [header, n-bytes, packets, checksum]
@@ -787,13 +800,37 @@ class PyRoombaAdapter:
             time_left = timeout_s - elapsed
         raise TimeoutError("Unable to read packets")
 
-    def request_sensor_data(self, packet_types: Iterable[PacketType], timeout_s=1):
-        header = 142  # All sensor requests have this header per OI spec.
+    def request_sensor_data(self, packet_types: Iterable[PacketType], timeout_s=1, debug=False):
         packet_ids = [int(x) for x in packet_types]
-        # Send command
-        self._send_cmd([header] + packet_ids)
+
+        if len(packet_ids) > 1:
+            request = [149, len(packet_ids)] + packet_ids
+        else:
+            request = [142] + packet_ids
+
+        if debug:
+            print("Sending:", request)
+
+        self._send_cmd(request)
+
         # Get response
-        return self._read_packets(timeout_s=timeout_s)
+        responses = []
+        for pid in packet_ids:
+            num_bytes = PacketInfo[PacketType(pid)][0]
+            if debug:
+                print(f'reading {num_bytes} bytes.')
+
+            data = self.serial_con.read(num_bytes)
+            if data == b'':
+                raise IOError("The Roomba did not respond.")
+
+            resp = decode_packet(pid, data)
+            responses.append(resp)
+            if debug:
+                print("received:", data, list(data))
+                print("decodes to:", resp)
+        return responses
+        # return self._read_packets(timeout_s=timeout_s)
 
 
 
